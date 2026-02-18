@@ -1,0 +1,13 @@
+The file with extension .adataset.gz is the actual full dataset.
+Once gunzipped, you'll get 16 lines per protein. The ones that matter are:
+
+-line 1: name
+-line 2: length
+-line 3: amino acid sequence
+-line 14: xyz coordinates, 3 per amino acid (space separation between
+x-y-z, tab between groups of 3)
+
+The file with extension .fasta.gz only contains name (preceded by ">")
+and sequence with no spaces for a subset of the larger dataset (~25k out
+of 522k). What you'll need to do is select the proteins present in this
+file from the larger file and use only these for your tests.
