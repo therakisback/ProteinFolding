@@ -11,3 +11,7 @@ pdb-vhse-1
 pdb-vhse2
 pdb-vhsetest-1
 pdb-vhsetest2
+pdb-pttest1000
+pdb-vhsetest1000
+pt_chkpt.pth.tar
+vhse_chkpt.pth.tar
