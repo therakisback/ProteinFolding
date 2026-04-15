@@ -16,3 +16,4 @@ pdb-vhsetest1000
 pt_chkpt.pth.tar
 vhse_chkpt.pth.tar
 /tensors
+*.tar

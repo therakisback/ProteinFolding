@@ -1,28 +1,4 @@
-# %% [markdown]
-# # Experimentation and Implementation
 
-# %% [markdown]
-# I plan on using this python notebook as a way to formulate how my neural networks should work. If you are reading this without having read the README.md I will quickly explain the goals of this project:
-# 
-# This project is meant to serve both as an introduction to protein folding via machine learning, and to test the potential strength of a relatively new algorithm named 'ProtTrans' which can take a string of protein residues and transform the input into a string that would be easier to read and train a neural network on for feasable proteins.
-
-# %% [markdown]
-# As a quick mark, here are the things I need to do in this file:
-# 1) Import protein residue data
-# 2) Processes, refine, and reduce data so that the nn can be trained quickly to experiment and adapt
-# 3) build and train neural network that takes in residues straight.
-# 4) incorporate ProtTrans, feed data in, and store output
-# 5) build and train another neural network on ProtTrans output data
-# 6) Optimize hyperparameters for both neural networks and experiment with various values like depth and # of hidden nodes.
-# 7) print graphs and data to compare and analyize
-# 
-# I am not entirely sure what type of output the cnn should provide, it can either provide a 0-1 value of certainty of contact, then we use a cutoff to decide what is a contact or not, or it can provide a distance metric that we then filter to however many A we want to use to denote a "contact"
-# 
-
-# %% [markdown]
-# # Imports and dependencies
-
-# %%
 import torch
 from torch import nn
 import numpy as np
@@ -30,74 +6,27 @@ import matplotlib.pyplot as plt
 from itertools import islice
 from tqdm import tqdm
 import os.path
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+import linecache
+import ast
+import time
+from transformers import T5EncoderModel, T5Tokenizer
+from datetime import datetime
+
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)} is available.")
 else:
     print("No GPU available, using CPU")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+MAXLENGTH = 200
 
-# %% [markdown]
-# # Importing Protein Data
-
-# %% [markdown]
-# I will use the following code box to try and visualize the data given in the 'adataset' pdb file. 
-# 
-# The key features I need to be able to extract are name, length, amino acid residues, and the contact map.
-# 
-# A lot of this is written in a way that should make it easy to apply this to the whole database.
-
-# %%
-with open("pdb.fasta_qual.16Nov2022.adataset") as pdb_adataset:
-    # Extract the data we need from the slice of the dataset
-    segment = list(islice(pdb_adataset, 16))
-    data = {"name": [], "length": [], "proteins": [], "xyz": []}
-    data["name"].append(segment[0].replace("\n", ""))
-    data["length"].append(int(segment[1]))
-
-    # protein and coords need extra care, as they are lists in the dict list
-    data["proteins"].append(
-        segment[2].replace("\n", "")
-            .split("\t")
-    )
-    del data["proteins"][0][-1]
-
-    data["xyz"].append(
-        segment[13].replace("\n", "")
-            .split("\t")
-        )
-    del data["xyz"][0][-1]
-
-    # We are going to use a for loop to turn the xyz coordinates into floats and make the triplet lists
-    i = 0
-    for string in data["xyz"][0]:
-        data["xyz"][0][i] = list(map(float, string.split(" ")))
-        i += 1
-
-print(data["name"][0])
-print(data["length"][0])
-print(data["proteins"][0])
-print(len(data["proteins"][0]))
-print(data["xyz"][0])
-print(len(data["xyz"][0]))
-
-# Calculating and printing the contact map
-def createContactMap(coordinates):
-    contact = []
-    for coord1 in coordinates:
-        temp = []
-        for coord2 in coordinates:
-            distance = np.linalg.norm(np.array(coord1) - np.array(coord2))
-            temp.append(distance)
-        contact.append(temp)
-    return contact
-
-def applyThreshold(tensor, threshold, length):  
+def applyThreshold(tensor, threshold):  
     map = []
     for i, line in enumerate(tensor, 0):
-        if i == length: break
         temp_line = []
-        for element in line[:length]:
+        for element in line:
             if (element < threshold):
                 temp_line.append(1.)
             else:
@@ -115,25 +44,6 @@ def printMap(map, size = -1):
     ax.axis('off')
     plt.show()
 
-contact = createContactMap(data["xyz"][0])
-contact = applyThreshold(contact, 8, data["length"][0])
-printMap(contact)
-
-# %% [markdown]
-# ## Loading in data from dataset
-
-# %% [markdown]
-# This is a large text box, though its functionality is not complicated. The class loads in the data from the file, then encodes the protein resiude list using VHSE encodings, which are then concatenated into pairs to represent the tensors, the train tensors are a Length x Length grid of vectors of length 16 (8 per residue in each pair). The test data takes the coordinates given by the database to make a tensor of L x L with each value being the distance between each protein (as seen above)
-# 
-# Previously calculated statistics:
-# 
-# Max length:  1195 	Min length:  30 	Mean length:  219.79 	Mode length:  233
-# 
-# Chars used in proteins:  {'N', 'F', 'P', 'A', 'D', 'M', 'T', 'G', 'Q', 'H', 'I', 'K', 'W', 'Y', 'X', 'V', 'S', 'E', 'C', 'R', 'L'} 	Count:  21
-
-# %%
-MAXLENGTH = 200
-
 def generate_data():
     data = {"name": [], "length": [], "proteins": [], "coord": []}
     print("Reading in from dataset files")
@@ -143,7 +53,6 @@ def generate_data():
         fasta_lines = pdb_fasta.readlines()[0::2]
     fasta_lines = [s.replace('>', '') for s in fasta_lines]
     fasta_lines = [s.replace('\n', '') for s in fasta_lines]
-
     
     i = 0
 
@@ -180,18 +89,6 @@ def generate_data():
     print(f"Name: {data['name'][0]} \tLength: {data['length'][0]} \nResidue Chain: {data['proteins'][0]} \nCoordinates: {data['coord'][0]}")
     return data
 
-data = generate_data()
-
-# %% [markdown]
-# ## VHSE Dataset
-# This is the dataset that converts the previously imported data into the VHSE encodings. It stores the encodings, target contact map, and length in a file. getitem reads from that file and returns the tensor that is actually input into the CNN.
-
-# %%
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
-import linecache
-import ast
-
 class vhseDataset(Dataset):
     vhse_map = {
         'A': [0.15, -1.11, -1.35, -0.92, 0.02, -0.91, 0.36, -0.48],
@@ -200,7 +97,7 @@ class vhseDataset(Dataset):
         'D': [-1.15, 0.67, -0.41, -0.01, -2.68, 1.31, 0.03, 0.56],
         'C': [0.18, -1.67, -0.46, -0.21, 0, 1.2, -1.61, -0.19],
         'Q': [-0.96, 0.12, 0.18, 0.16, 0.09, 0.42, -0.2, -0.41],
-        'E': [-1.18, 0.4, 0.1, 0.36, -21.6, -0.17, 0.91, 0.02],
+        'E': [-1.18, 0.4, 0.1, 0.36, -2.16, -0.17, 0.91, 0.02],
         'G': [-0.2, -1.53, -2.63, 2.28, -0.53, -1.18, 2.01, -1.34],
         'H': [-0.43, -0.25, 0.37, 0.19, 0.51, 1.28, 0.93, 0.65],
         'I': [1.27, -0.14, 0.3, -1.8, 0.3, -1.61, -0.16, -0.13],
@@ -217,122 +114,102 @@ class vhseDataset(Dataset):
         'X': [0, 0, 0, 0, 0, 0, 0, 0],
     }
 
-    def __init__(self, data, num_data = -1):
+    def __init__(self, num_data = -1, test = False):
         self.length = 0
-        self.samples = []
-
-        if num_data >= 1:
-            dataset = {key: value[-num_data:] for key, value in data.items()}
-        else:
-            dataset = data
-        
-        # I need to sort the dataset items in the same way as the embedding method so the data aligns
-        indices = sorted(range(len(dataset['length'])), key=lambda i: dataset['length'][i], reverse=True)
-        dataset = {key: [value[i] for i in indices] for key, value in dataset.items()}
-
-        if not os.path.exists("./tensors/vhse"):
-            os.makedirs("./tensors/vhse")
-                        
+        self.max = -1
+        # If we are using all the data there is no need to seperate the two
+        if num_data == -1:
+            test = False
             
+        if test:
+            self.file = f"pdb-vhsetest{num_data}"
+        else:
+            self.file = f"pdb-vhse{num_data}"
+        # Check to see if the necessary file exists, if it doesn't, create it
+        if not os.path.isfile(self.file):
+            # If the data hasn't been loaded from the file, do so.
+            data = generate_data()
 
-            for i, protein in enumerate(tqdm(dataset["proteins"])):
-
-                encoding = []
-                for residue in protein:
-                    encoding.append(self.vhse_map[residue])
-                encoding = list(encoding)
-
-                tensor = torch.tensor(encoding)
-                tensor.half()
-                filename = f"./tensors/vhse/{dataset['name'][i]}.pt"
-                torch.save(tensor, filename)
-
-                # Convert residue coords to distances
-                protein = dataset['coord'][i]
-                protein = np.array(protein)
-                map = protein[:, None, :] - protein[None, :, :]
-                map = np.linalg.norm(map, axis=2)
-                map = applyThreshold(map, 8, dataset['length'][0])
-                map = np.float32(map)
-                map = torch.tensor(map).unsqueeze(0)
-                t_filename = f"./tensors/vhse/{dataset['name'][i]}-t.pt"
-                torch.save(map, t_filename)
-
-                self.samples.append((filename, t_filename))
+            # Cut data based on specified length. 'test' dataset takes from the end of the data
+            if num_data >= 1:
+                if test:
+                    dataset = {key: value[-num_data:] for key, value in data.items()}
+                else:
+                    dataset = {key: value[:num_data] for key, value in data.items()}
+            else:
+                dataset = data
                 
-                self.length += 1 
-        else: 
-            for name in dataset['name']:
-                filename = f"./tensors/vhse/{name}.pt"
-                t_filename = f"./tensors/vhse/{name}-t.pt"
-                self.samples.append(((filename, t_filename)))
+            
+            with open(self.file, 'x') as pdb:
+                for i, protein in enumerate(tqdm(dataset['proteins'])):
+                    # Encode the protein residues based on the VHSE encodings dictionary
+                    encoding = []
+                    for residue in protein:
+                        encoding.append(self.vhse_map[residue])
 
-            files = os.listdir("./tensors/vhse")
-            self.length = len([f for f in files if not f.endswith("-t.pt")])
+                    encoding = list(encoding)
+                    pdb.write(f"{encoding}\n")
+
+                    length = dataset['length'][i]
+                    
+                    # Convert residue coords to distances
+                    protein = dataset['coord'][i]
+                    protein = np.array(protein)
+                    tensor = protein[:, None, :] - protein[None, :, :]
+                    # Takes euclidean norm of  x,y,z
+                    tensor = np.linalg.norm(tensor, axis=2)
+                    tensor = applyThreshold(tensor, 8)
+                    pdb.write(f"{tensor}\n")
+
+                    pdb.write(f"{length}\n")
+
+                    self.length += 1
+
+        else:
+            with open(self.file) as pdb:
+                self.length = int(sum(1 for line in pdb) / 3)
     
     def __len__(self):
         return self.length
     
     # I have made this a drive-read class for memory reasons, it will be much slower but hopefully wont consume over 32gb of memory
     def __getitem__(self, index):
-        filename, filename_t = self.samples[index]
+        f_i = (index * 3) + 1
 
-        tensor = torch.load(filename)
-        tensor.numpy()
+        # Import encodings from file
+        line = linecache.getline(self.file, f_i)
+        protein = line.replace("\n", "")
+        protein = np.array(ast.literal_eval(protein))
+        protein = np.float32(protein)
+        # I make a 32-length vector based on the pair of encodings
         tensor = np.concatenate([
-                            tensor[:, None, :] + np.zeros_like(tensor[None, :, :]),  # first embedding
-                            tensor[None, :, :] + np.zeros_like(tensor[:, None, :]),  # second embedding
-                            tensor[:, None, :] - tensor[None, :, :],                 # difference
-                            tensor[:, None, :] * tensor[None, :, :]                  # sum
-                            ], axis=-1)
+                    protein[:, None, :] + np.zeros_like(protein[None, :, :]),  # features of first residue
+                    protein[None, :, :] + np.zeros_like(protein[:, None, :]),  # features of second residue
+                    protein[:, None, :] - protein[None, :, :],                 # difference
+                    protein[:, None, :] * protein[None, :, :]                  # sum
+                    ], axis=-1)
         tensor = torch.tensor(tensor)
         tensor = tensor.permute(2, 0, 1)
-        map = torch.load(filename_t)
-        length = map.size(dim = 1)
+        tensor = torch.nn.functional.normalize(tensor)
+        
+
+        # Import length
+        line = linecache.getline(self.file, f_i + 2)
+        length = line.replace("\n", "")
+        length = np.int64(length)
+
+        # Import coordinate map
+        line = linecache.getline(self.file, f_i + 1)
+        map = line.replace("\n", "")
+        map = np.array(ast.literal_eval(map))
+        map = np.float32(map)
+        map = torch.tensor(map).unsqueeze(0)
+
+        linecache.checkcache()
 
         return tensor, map, length
 
-# %% [markdown]
-# ### Visualize the VHSE dataset, and ensure its functionality 
 
-# %%
-batch = 1 # I am setting the batch size to 1, as the dataloaders don't like different size tensors, and thus wouldnt allow a FCNN
-count = -1  # -1 Does all data
-train_data = vhseDataset(num_data = count, data = data)
-train_loader = DataLoader(dataset = train_data, batch_size = batch, shuffle = True)
-test_data = vhseDataset(num_data = 1000, data = data)
-test_loader = DataLoader(dataset = test_data, batch_size = batch, shuffle=True)
-
-# %%
-import torchshow
-trainiter = iter(train_loader)
-
-# Train data
-train, target, length = next(trainiter)
-print(train.shape)
-train = train.squeeze(0)
-torchshow.show(train[25])
-print(f"{train[0][25]}")
-# This doesn't look how I expected it to, but the printed tensor does
-torchshow.show(train[0])
-
-# Target data
-target = target[0]
-#print(target)
-printMap(target.squeeze(0))
-print(target)
-printMap(target.squeeze(0), length[0])
-
-# %% [markdown]
-# ## ProtTrans Encodings & Dataset
-# The first box is a set of methods given by the ProtTrans colab at: https://colab.research.google.com/drive/1TUj-ayG3WO52n5N50S7KH9vtt6zRkdmj?usp=sharing#scrollTo=nK4hwGggR_Rs 
-# This will generate the encodings for each protein when called. It is worth noting however that I have removed the structural protein data for now as there was issues with it. I will also add back the protein embeddings if I get access to a more powerful machine.
-# The second box uses those methods to create a dataset, that reads in the protein residues, encodes them, writes them to file, then retrieves them when necessary.
-
-# %%
-# Embedding generation from ProtTrans Colab: https://colab.research.google.com/drive/1TUj-ayG3WO52n5N50S7KH9vtt6zRkdmj?usp=sharing#scrollTo=nK4hwGggR_Rs 
-import time
-from transformers import T5EncoderModel, T5Tokenizer
 
 def get_T5_model():
     model = T5EncoderModel.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc")
@@ -410,124 +287,112 @@ def get_embeddings( model, tokenizer, seqs, per_residue, per_protein,
     print('\n############# END #############')
     return results
 
-# %% [markdown]
-# ### PT Dataset Class
-# I will explain this code less, as it is quite similar to the VHSE dataset
-
-# %%
 class ptDataset(Dataset):
 
-    def __init__(self, data, num_data = -1):
+    def __init__(self, num_data = -1, test = False):
         self.length = 0
-        self.samples = []
-
-        if num_data >= 1:
-            dataset = {key: value[-num_data:] for key, value in data.items()}
+        # If we are using all the data there is no need to seperate the two
+        if num_data == -1:
+            test = False
+        if test:
+            self.file = f"pdb-pttest{num_data}"
         else:
-            dataset = data
+            self.file = f"pdb-pt{num_data}"
         
-        # I need to sort the dataset items in the same way as the embedding method so the data aligns
-        indices = sorted(range(len(dataset['length'])), key=lambda i: dataset['length'][i], reverse=True)
-        dataset = {key: [value[i] for i in indices] for key, value in dataset.items()}
+        if not os.path.isfile(self.file):
 
-        if not os.path.exists("./tensors/pt"):
-            os.makedirs("./tensors/pt")
+            data = generate_data()
+
+            if num_data >= 1:
+                if test:
+                    dataset = {key: value[-num_data:] for key, value in data.items()}
+                else:
+                    dataset = {key: value[:num_data] for key, value in data.items()}
+            else:
+                dataset = data
+
+            # I need to sort the dataset items in the same way as the embedding method so the data aligns
+            indices = sorted(range(len(dataset['length'])), key=lambda i: dataset['length'][i], reverse=True)
+            dataset = {key: [value[i] for i in indices] for key, value in dataset.items()}
                         
             # We need to convert the data to a dictionary that the prot-trans method can read
             # This should maintain order, so I can still use dataset
             sequences = {key: value for key, value in zip(dataset['name'], dataset['proteins'])}
             
-            model, tokenizer = get_T5_model()
-            results = get_embeddings(model, tokenizer, sequences, True, False)
-            for i, data in enumerate(tqdm(results['residue_embs'].items())):
-                key, value = data
+            with open(self.file, 'x') as pdb:
+                model, tokenizer = get_T5_model()
+                # I am not sure how to implement the 1024x1 protein-embedding vector, so we will avoid it for now
+                results = get_embeddings(model, tokenizer, sequences, True, False)
+                for i, data in enumerate(tqdm(results['residue_embs'].items())):
+                    key, value = data
 
+                    # I write length first as it was important to retrieve first before, now the CNN is fully convolutional it's simply a vestigial remnant.
+                    length = dataset['length'][i]
+                    pdb.write(f"{length}\n")
 
-                tensor = torch.tensor(value)
-                tensor.half()
-                filename = f"./tensors/pt/{dataset['name'][i]}.pt"
-                torch.save(tensor, filename)
+                    pdb.write(f"{np.ndarray.tolist(value)}\n")
 
-                # Convert residue coords to distances
-                protein = dataset['coord'][i]
-                protein = np.array(protein)
-                map = protein[:, None, :] - protein[None, :, :]
-                map = np.linalg.norm(map, axis=2)
-                map = applyThreshold(map, 8, dataset['length'][0])
-                map = np.float32(map)
-                map = torch.tensor(map).unsqueeze(0)
-                t_filename = f"./tensors/pt/{dataset['name'][i]}-t.pt"
-                torch.save(map, t_filename)
-
-                self.samples.append((filename, t_filename))
+                    # Convert residue coords to distances
+                    protein = dataset['coord'][i]
+                    protein = np.array(protein)
+                    tensor = protein[:, None, :] - protein[None, :, :]
+                    tensor = np.linalg.norm(tensor, axis=2)
+                    tensor = applyThreshold(tensor, 8)
+                    pdb.write(f"{tensor}\n")
+                    
+                    self.length += 1    
+        else:
+            with open(self.file) as pdb:
+                self.length = int(sum(1 for line in pdb) / 3)
                 
-                self.length += 1      
-        else: 
-            for name in dataset['name']:
-                filename = f"./tensors/pt/{name}.pt"
-                t_filename = f"./tensors/pt/{name}-t.pt"
-                self.samples.append(((filename, t_filename)))
-
-            files = os.listdir("./tensors/pt")
-            self.length = len([f for f in files if not f.endswith("-t.pt")])   
                 
 
     def __len__(self):
         return self.length
     
     def __getitem__(self, index):
-        filename, filename_t = self.samples[index]
+        f_i = (index * 3) + 1
 
-        tensor = torch.load(filename)
-        tensor.numpy()
+        # Import length
+        line = linecache.getline(self.file, f_i)
+        length = line.replace("\n", "")
+        length = np.int64(length)
+
+        # Import and adjust encodings
+        line = linecache.getline(self.file, f_i + 1)
+        protein = line.replace("\n", "")
+        protein = np.array(ast.literal_eval(protein))
+        protein = np.float32(protein)
         tensor = np.concatenate([
-                            tensor[:, None, :] + np.zeros_like(tensor[None, :, :]),  # first embedding
-                            tensor[None, :, :] + np.zeros_like(tensor[:, None, :]),  # second embedding
-                            tensor[:, None, :] - tensor[None, :, :],                 # difference
-                            tensor[:, None, :] * tensor[None, :, :]                  # sum
-                            ], axis=-1)
+                    protein[:, None, :] + np.zeros_like(protein[None, :, :]),  # first embedding
+                    protein[None, :, :] + np.zeros_like(protein[:, None, :]),  # second embedding
+                    protein[:, None, :] - protein[None, :, :],                 # difference
+                    protein[:, None, :] * protein[None, :, :]                  # sum
+                    ], axis=-1)
         tensor = torch.tensor(tensor)
         tensor = tensor.permute(2, 0, 1)
-        map = torch.load(filename_t)
-        length = map.size(dim = 1 )
+        tensor = torch.nn.functional.normalize(tensor)
 
+        # Import coordinate map
+        line = linecache.getline(self.file, f_i + 2)
+        map = line.replace("\n", "")
+        map = np.array(ast.literal_eval(map))
+        map = np.float32(map)
+        map = torch.tensor(map).unsqueeze(0)
+
+        linecache.checkcache()
 
         return tensor, map, length
 
+# Here we initialize both datasets, and their testing counterparts
 
-# %% [markdown]
-# ## Visualize and test PT Dataset
+train_data = vhseDataset(num_data = -1)
+test_data = vhseDataset(num_data = 1000, test = True)
 
-# %%
-batch = 1
-count = -1
-train_data_pt = ptDataset(num_data = count, data = data)
-train_loader_pt = DataLoader(dataset = train_data_pt, batch_size = batch, shuffle = True)
-test_data_pt = ptDataset(num_data = 1000, data = data)
-test_loader_pt = DataLoader(dataset = test_data_pt, batch_size = batch, shuffle=True)
+train_data_pt = ptDataset(num_data = -1)
+test_data_pt = ptDataset(num_data = 1000, test = True)
 
-# %%
-# Train data
-train, target, length = train_data_pt[0]
-print(train.shape)
-train = train.squeeze(0)
-torchshow.show(train)
-print(f"{train}")
-# This doesn't look how I expected it to, but the printed tensor does
-torchshow.show(train)
-
-# Target data
-target = target
-#print(target)
-printMap(target.squeeze(0))
-print(target)
-printMap(target.squeeze(0), length)
-
-# %% [markdown]
-# # Creating a Convolutional Neural Network
-# There are likely ways to improve this code that I have not seen. I know for sure that I would like to incorporate a way to save the current state of the CNN, but that will have to be saved for another day... And likely the day I decide to actually fully train the CNN
-
-# %%
+# Generating PT embeddings can leave the GPU cache full, or at least messy.
 torch.cuda.empty_cache()
 
 class CNN(nn.Module):
@@ -552,13 +417,11 @@ class CNN(nn.Module):
         x = self.prime(x)
         x = self.hidden(x)
         x = self.final(x)
-        # Ensure it is mirrored
-        x = (x + x.transpose(-1, -2)) / 2
         
+        x = (x + x.transpose(-1, -2)) / 2
         return x
 
-# %%
-loss_func = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([5.0])).to(device)
+loss_func = nn.BCEWithLogitsLoss().to(device)
 
 def one_epoch(model, optimizer, train_loader):
     running_loss = 0
@@ -570,8 +433,6 @@ def one_epoch(model, optimizer, train_loader):
         inputs, targets, length = data
 
         inputs = inputs.to(device)
-        inputs = torch.nn.functional.normalize(inputs)
-
         targets = targets.to(device)
 
         outputs = model(inputs)
@@ -583,16 +444,13 @@ def one_epoch(model, optimizer, train_loader):
 
         optimizer.step()
         running_loss += loss.item()
-        if i % 1000 / batch == 250 / batch - 1:
+        if i % 1000 == 999:
             last_loss = running_loss # loss per batch
             print(f'  batch {i+1} loss: {last_loss}')
             running_loss = 0.
         
     return last_loss
 
-# %%
-from torch.utils.tensorboard import SummaryWriter
-from datetime import datetime
 
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
@@ -641,71 +499,24 @@ def train_CNN(model, epochs, train_loader, test_loader, checkpoint_dir = "checkp
 
         epoch_number += 1
 
-# %% [markdown]
-# ## Training CNN on VHSE Dataset
 
-# %%
+# Train VHSE CNN
 batch = 1
-epochs = 1
-train_loader = DataLoader(dataset = train_data, batch_size = batch, shuffle = True, num_workers = 4)
+epochs = 5
+train_loader = DataLoader(dataset = train_data, batch_size = batch, shuffle = True)
 test_loader = DataLoader(dataset = test_data, batch_size = batch, shuffle = True)
 vhse_model = CNN(32, 32)
 vhse_model = vhse_model.to(device)
 
 train_CNN(vhse_model, epochs, train_loader, test_loader, "vhse_chkpt")
 
-# %% [markdown]
-# ### Simple model test & demonstration
+# Train PT CNN
 
-# %%
-tensor, label, length = test_data[0]
-tensor = tensor.unsqueeze(0).to(device)
-out_vhse = vhse_model(tensor)
-print(out_vhse.shape)
-
-out_vhse = out_vhse.to("cpu").squeeze().detach().numpy()
-label = label.squeeze()
-length = length.squeeze()
-
-print(label)
-printMap(label, length)
-
-print(out_vhse)
-printMap(out_vhse, length)
-
-# %% [markdown]
-# 
-# ## Training & Testing ProtTrans Data
-
-# %%
-batch = 1
-train_loader = DataLoader(dataset = train_data_pt, batch_size = batch, shuffle = True, num_workers=8)
-test_loader = DataLoader(dataset = test_data_pt, batch_size = batch, shuffle = True, num_workers=8)
+train_loader = DataLoader(dataset = train_data_pt, batch_size = batch, shuffle = True)
+test_loader = DataLoader(dataset = test_data_pt, batch_size = batch, shuffle = True)
 pt_model = CNN(4096, 64)
 pt_model = pt_model.to(device)
 # Epochs is defined above with the VHSE data. I will keep them the same for now.
 train_CNN(pt_model, epochs, train_loader, test_loader, "pt_chkpt")
 
-# %% [markdown]
-# ### Visual Test & Display of PT CNN
-
-# %%
-testiter = iter(test_loader)
-
-torch.cuda.empty_cache()
-
-tensor, label, length = test_data_pt[0]
-
-label = label.squeeze()
-print(label)
-printMap(label, length)
-
-tensor = tensor.to(device)
-out_pt = pt_model(tensor)
-print(out_pt.shape)
-out_pt = out_pt.to("cpu")[0].detach().numpy()
-print(out_pt)
-out_pt = applyThreshold(out_pt, 0, length)
-printMap(out_pt, length)
-
-
+# To investigate performance of the CNN's check the test ipynb
