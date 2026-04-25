@@ -17,3 +17,5 @@ pt_chkpt.pth.tar
 vhse_chkpt.pth.tar
 /tensors
 *.tar
+pdb-pt-1000
+pdb-vhse-1000
